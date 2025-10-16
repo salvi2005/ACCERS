@@ -1,0 +1,616 @@
+import cv2
+import mediapipe as mp
+import time
+import numpy as np
+import uuid
+from datetime import datetime
+
+class PalmPaymentSystem:
+    """
+    Palm Scan Payment System with simplified implementation
+    """
+    
+    def __init__(self):
+        # Initialize MediaPipe Hands
+        self.mp_hands = mp.solutions.hands
+        self.hands = self.mp_hands.Hands(
+            static_image_mode=False,
+            max_num_hands=1,
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.7
+        )
+        self.mp_draw = mp.solutions.drawing_utils
+        
+        # System state
+        self.state = "WAITING"  # States: WAITING, SCANNING, VERIFYING, APPROVED, CONFIRMED, SUCCESS
+        self.hand_detected = False
+        self.transaction_id = None
+        self.detection_time = None
+        self.verification_progress = 0
+        self.transaction_complete = False
+        
+        # Consumer data
+        self.consumer_details = {
+            "name": "John Smith",
+            "account_number": "**7890",
+            "balance": "$2,450.32",
+            "loyalty_level": "Gold"
+        }
+        
+        # Merchant data
+        self.merchant_details = {
+            "name": "",
+            "terminal_id": "",
+            "amount": ""
+        }
+        
+        # UI colors
+        self.colors = {
+            "primary": (0, 120, 255),  # Blue
+            "success": (0, 200, 100),  # Green
+            "warning": (0, 140, 240),  # Yellow
+            "danger": (0, 0, 220),     # Red
+            "white": (255, 255, 255),
+            "black": (0, 0, 0),
+            "gray": (150, 150, 150)
+        }
+        
+        # Performance tracking
+        self.frame_count = 0
+        self.start_time = time.time()
+        self.fps = 0
+    
+    def process_frame(self, frame):
+        """Process a video frame and update system state"""
+        if frame is None:
+            return frame, False
+            
+        # Convert BGR to RGB for MediaPipe
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.hands.process(rgb_frame)
+        
+        # Update FPS calculation
+        self.frame_count += 1
+        elapsed_time = time.time() - self.start_time
+        if elapsed_time > 1:
+            self.fps = self.frame_count / elapsed_time
+            self.frame_count = 0
+            self.start_time = time.time()
+        
+        # Check for hand detection
+        prev_hand_detected = self.hand_detected
+        self.hand_detected = bool(results.multi_hand_landmarks)
+        
+        # State machine logic
+        self._update_state()
+        
+        # Draw UI based on current state
+        self.draw_ui(frame, results.multi_hand_landmarks)
+        
+        # Draw hand landmarks if detected
+        if self.hand_detected and results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                self.draw_enhanced_hand_landmarks(frame, hand_landmarks)
+        
+        # Return signal to continue or exit
+        return frame, self.state == "SUCCESS" and time.time() - self.success_animation > 3
+    
+    def _update_state(self):
+        """Update system state based on hand detection and timing"""
+        if self.state == "WAITING" and self.hand_detected:
+            self.state = "SCANNING"
+            self.transaction_id = f"TX-{uuid.uuid4().hex[:8]}"
+            self.detection_time = time.time()
+            print(f"\n🖐 Hand detected! Transaction ID: {self.transaction_id}")
+            print(f"👤 Customer: {self.consumer_details['name']} (Acct: {self.consumer_details['account_number']})")
+            print(f"💰 Amount: {self.merchant_details['amount']}")
+        
+        elif self.state == "SCANNING":
+            if self.hand_detected and time.time() - self.detection_time > 1.5:
+                self.state = "VERIFYING"
+                print("\n🔍 Palm scan complete. Verifying payment...")
+            elif not self.hand_detected:
+                self.state = "WAITING"
+                print("\n⚠ Hand lost during scanning. Please try again.")
+        
+        elif self.state == "VERIFYING":
+            self.verification_progress += 1.5
+            
+            if self.verification_progress >= 100:
+                self.state = "APPROVED"
+                self.approval_time = time.time()
+                print("\n✅ Payment verified! Press Y to confirm transaction.")
+            
+            if not self.hand_detected:
+                self.state = "WAITING"
+                self.verification_progress = 0
+                print("\n⚠ Hand lost during verification. Please try again.")
+                
+        elif self.state == "CONFIRMED" and not self.hand_detected:
+            self.state = "SUCCESS"
+            self.transaction_complete = True
+            self.success_animation = time.time()
+            print("\n🎉 Transaction complete!")
+    
+    def draw_enhanced_hand_landmarks(self, frame, hand_landmarks):
+        """Draw hand landmarks with state-specific styling"""
+        h, w, _ = frame.shape
+        
+        # Determine color based on state
+        if self.state in ["APPROVED", "CONFIRMED", "SUCCESS"]:
+            color = self.colors["success"]
+        elif self.state == "VERIFYING":
+            # Pulse between primary and success color during verification
+            pulse = (np.sin(time.time() * 4) + 1) / 2
+            r = int(self.colors["primary"][0] * (1-pulse) + self.colors["success"][0] * pulse)
+            g = int(self.colors["primary"][1] * (1-pulse) + self.colors["success"][1] * pulse)
+            b = int(self.colors["primary"][2] * (1-pulse) + self.colors["success"][2] * pulse)
+            color = (r, g, b)
+        else:
+            color = self.colors["primary"]
+        
+        # Draw connections
+        for connection in self.mp_hands.HAND_CONNECTIONS:
+            start_idx, end_idx = connection
+            start_point = hand_landmarks.landmark[start_idx]
+            end_point = hand_landmarks.landmark[end_idx]
+            
+            start_x, start_y = int(start_point.x * w), int(start_point.y * h)
+            end_x, end_y = int(end_point.x * w), int(end_point.y * h)
+            
+            cv2.line(frame, (start_x, start_y), (end_x, end_y), color, 2)
+        
+        # Draw landmarks
+        for id, landmark in enumerate(hand_landmarks.landmark):
+            x, y = int(landmark.x * w), int(landmark.y * h)
+            
+            # Highlight fingertips with larger circles
+            if id in [4, 8, 12, 16, 20]:  # Fingertips
+                cv2.circle(frame, (x, y), 8, color, -1)
+                cv2.circle(frame, (x, y), 8, self.colors["white"], 1)
+            else:
+                cv2.circle(frame, (x, y), 5, color, -1)
+    
+    def draw_ui(self, frame, hand_landmarks):
+        """Draw UI elements based on current state"""
+        h, w, _ = frame.shape
+        
+        # Draw title bar
+        cv2.rectangle(frame, (0, 0), (w, 60), (0, 0, 0), -1)
+        cv2.putText(frame, "Palm Payment System", (20, 40), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, self.colors["white"], 2)
+        
+        # Show FPS and state
+        fps_text = f"FPS: {self.fps:.1f}"
+        cv2.putText(frame, fps_text, (w - 150, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.colors["white"], 1)
+                    
+        state_text = f"State: {self.state}"
+        cv2.putText(frame, state_text, (w - 300, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.colors["white"], 1)
+        
+        # Draw state-specific UI
+        ui_methods = {
+            "WAITING": self._draw_waiting_ui,
+            "SCANNING": self._draw_scanning_ui,
+            "VERIFYING": self._draw_verifying_ui,
+            "APPROVED": self._draw_approved_ui,
+            "CONFIRMED": self._draw_confirmed_ui,
+            "SUCCESS": self._draw_success_ui
+        }
+        
+        if self.state in ui_methods:
+            ui_methods[self.state](frame)
+        
+        # Draw help text at bottom
+        cv2.rectangle(frame, (0, h-40), (w, h), (0, 0, 0), -1)
+        
+        help_texts = {
+            "WAITING": "Show your palm to the scanner to make payment | [Q] to Quit",
+            "SCANNING": "Hold your palm steady for scanning | [Q] to Quit",
+            "VERIFYING": "Verifying payment, please keep your palm steady | [Q] to Quit",
+            "APPROVED": "Press [Y] to confirm and complete transaction | [Q] to Quit",
+            "CONFIRMED": "Remove your palm to complete transaction | [Q] to Quit",
+            "SUCCESS": "Transaction complete | [Q] to Exit"
+        }
+        
+        help_text = help_texts.get(self.state, "Press [Q] to Quit")
+        cv2.putText(frame, help_text, (20, h-15), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.colors["white"], 1)
+    
+    def _draw_waiting_ui(self, frame):
+        """Draw UI for waiting state"""
+        h, w, _ = frame.shape
+        
+        # Show instruction
+        cv2.putText(frame, "Show your palm to initiate payment", (w//2 - 220, h//2), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, self.colors["white"], 2)
+
+        # Animated scanning effect
+        scan_pos = int(20 + (time.time() % 1.5) / 1.5 * (w - 40))
+        scan_y = h // 2 + 50
+        
+        # Draw scan line and brackets
+        cv2.line(frame, (20, scan_y), (w-20, scan_y), self.colors["gray"], 1)
+        cv2.line(frame, (scan_pos-30, scan_y), (scan_pos+30, scan_y), self.colors["primary"], 3)
+        
+        bracket_h = 100
+        # Left bracket
+        cv2.line(frame, (20, scan_y-bracket_h//2), (20, scan_y+bracket_h//2), self.colors["primary"], 2)
+        cv2.line(frame, (20, scan_y-bracket_h//2), (40, scan_y-bracket_h//2), self.colors["primary"], 2)
+        cv2.line(frame, (20, scan_y+bracket_h//2), (40, scan_y+bracket_h//2), self.colors["primary"], 2)
+        
+        # Right bracket
+        cv2.line(frame, (w-20, scan_y-bracket_h//2), (w-20, scan_y+bracket_h//2), self.colors["primary"], 2)
+        cv2.line(frame, (w-20, scan_y-bracket_h//2), (w-40, scan_y-bracket_h//2), self.colors["primary"], 2)
+        cv2.line(frame, (w-20, scan_y+bracket_h//2), (w-40, scan_y+bracket_h//2), self.colors["primary"], 2)
+        
+        # Transaction panel
+        self._draw_transaction_panel(frame)
+    
+    def _draw_transaction_panel(self, frame):
+        """Draw transaction details panel"""
+        h, w, _ = frame.shape
+        panel_y = h - 190
+        panel_height = 140
+        margin = 20
+        
+        cv2.rectangle(frame, (margin, panel_y), (w - margin, panel_y + panel_height), 
+                    self.colors["primary"], 2)
+        cv2.putText(frame, "Transaction Details", (margin + 20, panel_y + 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, self.colors["white"], 2)
+        
+        # Merchant info
+        merchant_details = [
+            ["Merchant:", self.merchant_details["name"]],
+            ["Terminal ID:", self.merchant_details["terminal_id"]],
+            ["Amount:", self.merchant_details["amount"]]
+        ]
+        
+        for i, (label, value) in enumerate(merchant_details):
+            y_pos = panel_y + 70 + (i * 30)
+            cv2.putText(frame, label, (margin + 30, y_pos), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.colors["gray"], 1)
+            cv2.putText(frame, value, (margin + 150, y_pos), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.colors["white"], 2)
+    
+    def _draw_scanning_ui(self, frame):
+        """Draw UI for scanning state"""
+        h, w, _ = frame.shape
+        
+        # Draw semi-transparent overlay
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 70), (w, h-70), (0, 0, 0), -1)
+        frame = cv2.addWeighted(overlay, 0.3, frame, 0.7, 0)
+        
+        # Draw scanning message
+        cv2.putText(frame, "Scanning Palm...", (w//2 - 120, 100), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, self.colors["primary"], 2)
+        
+        # Scanning area and animation
+        scan_height = int(h * 0.6)
+        center_y = h // 2
+        scan_start = center_y - scan_height // 2
+        scan_end = center_y + scan_height // 2
+        
+        # Calculate scan line position
+        scan_progress = (time.time() % 2) / 2
+        if scan_progress < 0.5:
+            scan_line_y = int(scan_start + scan_progress * 2 * scan_height)
+        else:
+            scan_line_y = int(scan_end - (scan_progress - 0.5) * 2 * scan_height)
+        
+        # Draw scan area and line
+        cv2.rectangle(frame, (w//2-150, scan_start), (w//2+150, scan_end), 
+                    self.colors["primary"], 2)
+        cv2.line(frame, (w//2-140, scan_line_y), (w//2+140, scan_line_y), 
+                self.colors["primary"], 3)
+        
+        # Progress calculation and bar
+        progress = min(100, int((time.time() - self.detection_time) / 1.5 * 100))
+        progress_width = int(300 * progress / 100)
+        cv2.rectangle(frame, (w//2-150, h-120), (w//2+150, h-100), self.colors["gray"], 1)
+        cv2.rectangle(frame, (w//2-150, h-120), (w//2-150+progress_width, h-100), 
+                    self.colors["primary"], -1)
+        
+        # Progress text
+        cv2.putText(frame, f"Scanning: {progress}%", (w//2-80, h-80), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, self.colors["white"], 2)
+    
+    def _draw_verifying_ui(self, frame):
+        """Draw UI for verification state"""
+        h, w, _ = frame.shape
+        
+        # Draw semi-transparent overlay
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 70), (w, h-70), (0, 0, 0), -1)
+        frame = cv2.addWeighted(overlay, 0.4, frame, 0.6, 0)
+        
+        # Draw verification message and progress
+        cv2.putText(frame, "Verifying Payment...", (w//2 - 150, 100), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, self.colors["primary"], 2)
+        
+        progress_width = int(300 * self.verification_progress / 100)
+        cv2.rectangle(frame, (w//2-150, 130), (w//2+150, 150), self.colors["gray"], 1)
+        cv2.rectangle(frame, (w//2-150, 130), (w//2-150+progress_width, 150), 
+                    self.colors["primary"], -1)
+        
+        cv2.putText(frame, f"Verification: {int(self.verification_progress)}%", (w//2-110, 180), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, self.colors["white"], 2)
+        
+        # Transaction panels and verification steps
+        self._draw_info_panels(frame)
+        self._draw_verification_steps(frame)
+    
+    def _draw_info_panels(self, frame):
+        """Draw customer and transaction info panels"""
+        h, w, _ = frame.shape
+        panel_y = 210
+        panel_height = 160
+        
+        # Customer info panel
+        cv2.rectangle(frame, (50, panel_y), (w//2-30, panel_y+panel_height), 
+                    self.colors["primary"], 2)
+        cv2.putText(frame, "Customer Information", (70, panel_y+30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, self.colors["white"], 2)
+        
+        customer_info = [
+            ["Name:", self.consumer_details["name"]],
+            ["Account:", self.consumer_details["account_number"]],
+            ["Balance:", self.consumer_details["balance"]],
+            ["Status:", self.consumer_details["loyalty_level"]]
+        ]
+        
+        for i, (label, value) in enumerate(customer_info):
+            y_pos = panel_y + 60 + i * 30
+            cv2.putText(frame, label, (70, y_pos), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.colors["gray"], 1)
+            cv2.putText(frame, value, (180, y_pos), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.colors["white"], 1)
+        
+        # Transaction info panel
+        cv2.rectangle(frame, (w//2+30, panel_y), (w-50, panel_y+panel_height), 
+                    self.colors["primary"], 2)
+        cv2.putText(frame, "Transaction Details", (w//2+50, panel_y+30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, self.colors["white"], 2)
+        
+        transaction_info = [
+            ["Merchant:", self.merchant_details["name"]],
+            ["Terminal:", self.merchant_details["terminal_id"]],
+            ["Amount:", self.merchant_details["amount"]],
+            ["Transaction ID:", self.transaction_id]
+        ]
+        
+        for i, (label, value) in enumerate(transaction_info):
+            y_pos = panel_y + 60 + i * 30
+            cv2.putText(frame, label, (w//2+50, y_pos), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.colors["gray"], 1)
+            cv2.putText(frame, value, (w//2+160, y_pos), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.colors["white"], 1)
+    
+    def _draw_verification_steps(self, frame):
+        """Draw verification steps progress"""
+        h, w, _ = frame.shape
+        steps = [
+            "✅ Palm Print Recognized",
+            "✅ Account Verified",
+            "⏳ Processing Payment" if self.verification_progress < 70 else "✅ Payment Processed",
+            "⏳ Finalizing" if self.verification_progress < 95 else "✅ Complete"
+        ]
+        
+        for i, step in enumerate(steps):
+            y_pos = h//2 + 200 + i * 30
+            cv2.putText(frame, step, (w//2-120, y_pos), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.colors["white"], 1)
+    
+    def _draw_approved_ui(self, frame):
+        """Draw UI for approved payment state"""
+        h, w, _ = frame.shape
+        
+        # Green overlay
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (w, h), (0, 50, 0), -1)
+        frame = cv2.addWeighted(overlay, 0.3, frame, 0.7, 0)
+        
+        # Animated checkmark
+        check_center = (w//2, h//2 - 50)
+        pulse = (np.sin(time.time() * 3) + 1) / 8 + 0.75
+        check_size = int(80 * pulse)
+        
+        cv2.circle(frame, check_center, check_size, self.colors["success"], 3)
+        cv2.line(frame, 
+                (check_center[0] - check_size//2, check_center[1]),
+                (check_center[0] - check_size//4, check_center[1] + check_size//2),
+                self.colors["white"], 5)
+        cv2.line(frame, 
+                (check_center[0] - check_size//4, check_center[1] + check_size//2),
+                (check_center[0] + check_size//2, check_center[1] - check_size//3),
+                self.colors["white"], 5)
+        
+        # Messages
+        cv2.putText(frame, "Payment Verified", (w//2 - 120, h//2 + 80), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, self.colors["white"], 2)
+        cv2.putText(frame, f"Amount: {self.merchant_details['amount']}", (w//2 - 80, h//2 + 130), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, self.colors["white"], 2)
+        cv2.putText(frame, "Press 'Y' to confirm payment", (w//2 - 160, h//2 + 180), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, self.colors["white"], 2)
+    
+    def _draw_confirmed_ui(self, frame):
+        """Draw UI for confirmed state"""
+        h, w, _ = frame.shape
+        
+        # Green overlay
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (w, h), (0, 70, 0), -1)
+        frame = cv2.addWeighted(overlay, 0.4, frame, 0.6, 0)
+        
+        # Messages
+        cv2.putText(frame, "Payment Confirmed!", (w//2 - 130, h//2 - 50), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, self.colors["white"], 2)
+        cv2.putText(frame, "Please remove your hand to complete", (w//2 - 210, h//2 + 20), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, self.colors["white"], 2)
+        cv2.putText(frame, f"Amount: {self.merchant_details['amount']}", (w//2 - 80, h//2 + 80), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, self.colors["white"], 2)
+        
+        # Hand removal animation
+        hand_center = (w//2, h//2 + 150)
+        cv2.rectangle(frame, (hand_center[0]-40, hand_center[1]-50), 
+                    (hand_center[0]+40, hand_center[1]+30), self.colors["white"], 2)
+        
+        arrow_progress = (np.sin(time.time() * 2) + 1) / 2
+        arrow_offset = int(arrow_progress * 40)
+        
+        cv2.arrowedLine(frame, 
+                      (hand_center[0], hand_center[1]), 
+                      (hand_center[0] + 80 + arrow_offset, hand_center[1]), 
+                      self.colors["white"], 3, tipLength=0.3)
+    
+    def _draw_success_ui(self, frame):
+        """Draw success UI"""
+        h, w, _ = frame.shape
+        
+        # Green overlay
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (w, h), (0, 120, 0), -1)
+        frame = cv2.addWeighted(overlay, 0.7, frame, 0.3, 0)
+        
+        # Expanding circles animation
+        center = (w//2, h//2)
+        elapsed = time.time() - self.success_animation
+        num_circles = 3
+        max_radius = int(min(w, h) * 0.4)
+        
+        for i in range(num_circles):
+            cycle_pos = (elapsed * 0.7 + i/num_circles) % 1.0
+            radius = int(cycle_pos * max_radius)
+            alpha = 1.0 - cycle_pos
+            
+            if radius > 0 and alpha > 0.1:
+                thickness = max(1, int(5 * alpha))
+                cv2.circle(frame, center, radius, self.colors["white"], thickness)
+        
+        # Success message and check mark
+        cv2.putText(frame, "Payment Successful!", (w//2 - 200, h//2 - 80), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.5, self.colors["white"], 3)
+        
+        check_center = (w//2, h//2 + 30)
+        check_size = 100
+        
+        cv2.circle(frame, check_center, check_size, self.colors["white"], 4)
+        cv2.line(frame, 
+                (check_center[0] - check_size//2, check_center[1]),
+                (check_center[0] - check_size//4, check_center[1] + check_size//2),
+                self.colors["white"], 8)
+        cv2.line(frame, 
+                (check_center[0] - check_size//4, check_center[1] + check_size//2),
+                (check_center[0] + check_size//2, check_center[1] - check_size//3),
+                self.colors["white"], 8)
+        
+        # Transaction details
+        y_pos = h//2 + 150
+        cv2.putText(frame, f"Amount: {self.merchant_details['amount']}", (w//2 - 100, y_pos), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, self.colors["white"], 2)
+        cv2.putText(frame, f"Transaction ID: {self.transaction_id}", (w//2 - 170, y_pos + 40), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, self.colors["white"], 2)
+        cv2.putText(frame, "Thank you for your payment!", (w//2 - 200, y_pos + 100), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, self.colors["white"], 2)
+    
+    def handle_key_press(self, key):
+        """Process keyboard input"""
+        if key == ord('y') and self.state == "APPROVED":
+            self.state = "CONFIRMED"
+            print("\n✅ Transaction confirmed. Please remove your hand.")
+            print("Once removed, the transaction will be completed.")
+        
+        return key
+    
+    def get_merchant_details(self):
+        """Get merchant details from user input"""
+        print("\n===== Palm Payment System Setup =====")
+        print("Please enter merchant details:")
+        
+        self.merchant_details["name"] = input("Merchant Name: ")
+        self.merchant_details["terminal_id"] = input("Terminal ID: ")
+        self.merchant_details["amount"] = input("Transaction Amount (e.g. $45.99): ")
+        
+        # Ensure amount has $ prefix
+        if not self.merchant_details["amount"].startswith("$"):
+            self.merchant_details["amount"] = "$" + self.merchant_details["amount"]
+        
+        print("\nMerchant details saved:")
+        print(f"- Merchant: {self.merchant_details['name']}")
+        print(f"- Terminal ID: {self.merchant_details['terminal_id']}")
+        print(f"- Amount: {self.merchant_details['amount']}")
+        print("\nInitializing camera...")
+
+    def run(self):
+        """Run the palm payment system"""
+        # Get merchant details before starting
+        self.get_merchant_details()
+        
+        # Initialize video capture
+        cap = cv2.VideoCapture(0)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        
+        while cap.isOpened():
+            # Read frame
+            ret, frame = cap.read()
+            if not ret:
+                print("Failed to grab frame")
+                break
+            
+            # Flip horizontally for mirror effect
+            frame = cv2.flip(frame, 1)
+            
+            # Process frame and check exit condition
+            processed_frame, should_exit = self.process_frame(frame)
+            
+            # Display the frame
+            cv2.imshow('Palm Payment System', processed_frame)
+            
+            # Handle keyboard input
+            key = cv2.waitKey(1) & 0xFF
+            key = self.handle_key_press(key)
+            
+            # Check for exit conditions
+            if key == ord('q') or key == 27 or should_exit:
+                break
+        
+        # Clean up
+        cap.release()
+        cv2.destroyAllWindows()
+        
+        # Print receipt if transaction was successful
+        if self.transaction_complete:
+            self.print_receipt()
+
+def print_receipt(self):
+    """Print a receipt to the console"""
+    receipt_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    print("\n\n" + "=" * 40)
+    print(f"{'PAYMENT RECEIPT':^40}")
+    print("=" * 40)
+    print(f"Date: {receipt_date}")
+    print(f"Transaction ID: {self.transaction_id}")
+    print("-" * 40)
+    print(f"Merchant: {self.merchant_details['name']}")
+    print(f"Terminal ID: {self.merchant_details['terminal_id']}")
+    print("-" * 40)
+    print(f"Customer: {self.consumer_details['name']}")
+    print(f"Account: {self.consumer_details['account_number']}")
+    print(f"Loyalty Level: {self.consumer_details['loyalty_level']}")
+    print("-" * 40)
+    print(f"{'Amount:':<20}{self.merchant_details['amount']:>20}")
+    print("=" * 40)
+    print(f"{'PAYMENT APPROVED':^40}")
+    print(f"{'Thank you for your business!':^40}")
+    print("=" * 40)
+
+
+# Main entry point
+if __name__ == "__main__":
+    # Create and run the payment system
+    payment_system = PalmPaymentSystem()
+payment_system.run()
